@@ -1,0 +1,14 @@
+.inventory-actions { display: flex; align-items: center; gap: 18px; }
+.primary-button.compact { padding: 11px 14px; cursor: pointer; }
+.category-tabs { display: flex; gap: 4px; margin-bottom: 20px; border-bottom: 1px solid var(--line); overflow-x: auto; }
+.category-tabs button { border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--muted); padding: 12px 15px; cursor: pointer; white-space: nowrap; font-size: 12px; }
+.category-tabs button.selected { border-color: var(--coral); color: var(--navy); font-weight: 700; }
+.category-tabs span { color: #999; margin-left: 6px; font-size: 10px; }
+.table-toolbar > div small { color: var(--muted); font-size: 10px; }
+.usage-chip { display: block; color: var(--navy); font-size: 10px; margin: 2px 0; }
+.form-overlay { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; padding: 18px; background: rgba(23,47,69,.55); }
+.inventory-form { width: min(100%, 650px); max-height: 92svh; overflow: auto; background: #f8f7f2; padding: 26px; box-shadow: 0 22px 60px rgba(0,0,0,.2); }
+.form-heading { display: flex; justify-content: space-between; align-items: start; margin-bottom: 24px; }.form-heading h3 { margin-top: 6px; font-size: 21px; }.icon-button { border: 0; background: transparent; color: var(--muted); cursor: pointer; }
+.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }.form-grid label { display: grid; gap: 6px; color: var(--muted); font-size: 11px; }.form-grid input, .form-grid select { border: 1px solid var(--line); background: white; padding: 11px; outline-color: var(--coral); }
+.inventory-form > .primary-button { justify-content: center; width: 100%; border: 0; margin-top: 19px; cursor: pointer; }.form-error { display: block; color: #bd5948; margin-top: 15px; font-size: 11px; }
+@media (max-width: 620px) { .inventory-actions { gap: 10px; }.inventory-actions .ghost-button { font-size: 0; }.inventory-actions .ghost-button svg { width: 18px; }.form-grid { grid-template-columns: 1fr; gap: 12px; }.inventory-form { padding: 22px 17px; }.category-tabs button { padding-inline: 10px; } }

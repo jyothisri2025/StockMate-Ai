@@ -1,0 +1,3 @@
+function Help() { return <section className="simple-page"><span className="eyebrow">QUICK GUIDE</span><h2>Help</h2><p>Stocky works best when you describe a clear change.</p><div className="help-grid"><div><b>Add stock</b><p>“Add 10 kg rice” or “I bought 3 litres of oil.”</p></div><div><b>Remove stock</b><p>“Used 500 g sugar” or “Sold 2 kg rice.”</p></div><div><b>Ask a question</b><p>“How much rice is left?” or “What is low?”</p></div></div></section>; }
+
+export default Help;

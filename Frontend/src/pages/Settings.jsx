@@ -1,0 +1,3 @@
+function Settings() { return <section className="simple-page"><span className="eyebrow">WORKSPACE</span><h2>Settings</h2><p>Configure your workspace defaults.</p><div className="settings-list"><label>Workspace name<input defaultValue="StockMate workspace" /></label><label>Default currency<select defaultValue="INR"><option>INR - Indian Rupee</option><option>USD - US Dollar</option></select></label><label className="toggle-row"><span><strong>Low stock alerts</strong><small>Show items at or below their reorder level.</small></span><input type="checkbox" defaultChecked /></label></div></section>; }
+
+export default Settings;

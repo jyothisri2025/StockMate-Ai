@@ -1,0 +1,10 @@
+.import-page { min-height: 100svh; display: grid; place-items: center; padding: 24px; background: radial-gradient(circle at 20% 20%, #2d536b, var(--navy) 55%); }
+.import-card { width: min(100%, 570px); background: #f8f7f2; padding: clamp(28px, 6vw, 58px); box-shadow: 0 24px 70px rgba(0,0,0,.2); }
+.import-icon { width: 58px; height: 58px; display: grid; place-items: center; background: #dceee4; color: var(--green); border-radius: 15px; margin-bottom: 25px; }
+.import-card h1 { font-size: clamp(2.3rem, 6vw, 4rem); line-height: .95; margin: 12px 0 17px; }
+.import-card > p { color: var(--muted); font-size: 13px; line-height: 1.65; margin-bottom: 25px; }
+.import-card form { display: grid; gap: 13px; }
+.file-drop { min-height: 150px; border: 1px dashed #bfcac3; background: #f2f6f1; color: var(--green); display: grid; place-items: center; align-content: center; gap: 7px; text-align: center; cursor: pointer; position: relative; padding: 20px; }
+.file-drop strong { color: var(--navy); font-size: 13px; overflow-wrap: anywhere; }.file-drop small { color: var(--muted); font-size: 11px; }.file-drop input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+.import-card .primary-button { justify-content: center; padding: 15px; cursor: pointer; }.import-card .primary-button:disabled { opacity: .6; cursor: wait; }.import-columns { border-top: 1px solid var(--line); margin-top: 25px; padding-top: 17px; display: grid; gap: 5px; font-size: 10px; color: var(--muted); }.import-columns strong { color: var(--navy); font-size: 11px; }
+.login-error { color: #bd5948; font-size: 11px; }

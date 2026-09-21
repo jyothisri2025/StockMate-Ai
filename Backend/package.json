@@ -1,0 +1,12 @@
+{
+  "name": "stockmate-api",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --env-file-if-exists=.env --watch server.mjs",
+    "start": "node --env-file-if-exists=.env server.mjs"
+  },
+  "dependencies": {
+    "xlsx": "^0.18.5"
+  }
+}

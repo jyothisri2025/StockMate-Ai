@@ -1,0 +1,4 @@
+.env
+inventory.json
+history.json
+node_modules/
