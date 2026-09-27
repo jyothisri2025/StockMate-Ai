@@ -7,6 +7,16 @@ function authHeaders(extra = {}) {
   return { ...extra, Authorization: `Bearer ${localStorage.getItem("stockmate-token") || ""}` };
 }
 
+async function readResponse(response, fallbackMessage) {
+  const payload = await response.json().catch(() => ({}));
+  if (response.status === 401) {
+    localStorage.removeItem("stockmate-token");
+    if (window.location.pathname !== "/login") window.location.assign("/login");
+  }
+  if (!response.ok) throw new Error(payload.error || fallbackMessage);
+  return payload;
+}
+
 export async function login(username, password) {
   const response = await fetch(`${API_URL}/api/login`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username, password }) });
   const payload = await response.json();
@@ -24,6 +34,13 @@ export async function importInventoryText(text, filename = "manual-import.txt") 
   const payload = await response.json();
   if (!response.ok) throw new Error(payload.error || "Could not import inventory");
   return payload.inventory;
+}
+
+export async function importMasterListText(text, filename = "master-list.csv") {
+  const response = await fetch(`${API_URL}/api/master-list`, { method: "POST", headers: authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ filename, text }) });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.error || "Could not process Master List");
+  return payload;
 }
 
 export async function importInventoryFile(file) {
@@ -57,10 +74,18 @@ export async function importInventoryFile(file) {
   throw new Error("Unsupported file type. Use Excel, Word, text, or image files.");
 }
 
+export async function importMasterListFile(file) {
+  const bytes = new Uint8Array(await file.arrayBuffer()); let binary = "";
+  bytes.forEach((byte) => { binary += String.fromCharCode(byte); });
+  const response = await fetch(`${API_URL}/api/master-list`, { method: "POST", headers: authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ filename: file.name, data: btoa(binary) }) });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.error || "Could not process Master List");
+  return payload;
+}
+
 export async function fetchInventory() {
   const response = await fetch(`${API_URL}/api/inventory`, { headers: authHeaders() });
-  if (!response.ok) throw new Error("Could not load inventory");
-  return (await response.json()).inventory;
+  return (await readResponse(response, "Could not load inventory")).inventory;
 }
 
 export async function askStocky(message) {
@@ -98,3 +123,20 @@ export async function fetchActivity() {
   if (!response.ok) throw new Error("Could not load activity");
   return response.json();
 }
+
+async function apiRequest(path, options = {}) {
+  const response = await fetch(`${API_URL}${path}`, { ...options, headers: authHeaders({ "Content-Type": "application/json", ...(options.headers || {}) }) });
+  return readResponse(response, "Request failed");
+}
+
+export async function fetchVendors() { return (await apiRequest("/api/vendors")).vendors; }
+export async function createVendor(vendor) { return (await apiRequest("/api/vendors", { method: "POST", body: JSON.stringify(vendor) })).vendor; }
+export async function updateVendor(vendorId, vendor) { return (await apiRequest(`/api/vendors/${encodeURIComponent(vendorId)}`, { method: "PUT", body: JSON.stringify(vendor) })).vendor; }
+export async function fetchPurchases() { return (await apiRequest("/api/purchases")).purchases; }
+export async function createPurchase(purchase) { return apiRequest("/api/purchases", { method: "POST", body: JSON.stringify(purchase) }); }
+export async function fetchIssues() { return (await apiRequest("/api/issues")).issues; }
+export async function createIssue(issue) { return apiRequest("/api/issues", { method: "POST", body: JSON.stringify(issue) }); }
+export async function fetchDailyReport(date) { return apiRequest(`/api/reports/daily?date=${encodeURIComponent(date)}`); }
+export async function fetchMonthlyReport(month) { return apiRequest(`/api/reports/monthly?month=${encodeURIComponent(month)}`); }
+export async function fetchDepartmentReport() { return apiRequest("/api/reports/departments"); }
+export async function fetchVendorReport() { return apiRequest("/api/reports/vendors"); }

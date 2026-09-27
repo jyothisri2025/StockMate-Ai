@@ -1,6 +1,6 @@
 import { NavLink, Outlet, Link } from "react-router-dom";
 import { motion } from "motion/react";
-import { Bot, Boxes, CircleHelp, History as HistoryIcon, LayoutDashboard, Menu, Settings, X } from "lucide-react";
+import { Bot, Boxes, CircleHelp, FileBarChart, History as HistoryIcon, LayoutDashboard, Menu, Settings, ShoppingCart, Truck, X } from "lucide-react";
 import { useState } from "react";
 
 function DashboardLayout() {
@@ -9,6 +9,10 @@ function DashboardLayout() {
     { to: "/", label: "Overview", icon: LayoutDashboard, end: true },
     { to: "/chat", label: "Talk to Stocky", icon: Bot },
     { to: "/inventory", label: "Inventory", icon: Boxes },
+    { to: "/purchases", label: "Purchases", icon: ShoppingCart },
+    { to: "/issues", label: "Issues", icon: Truck },
+    { to: "/vendors", label: "Vendors", icon: FileBarChart },
+    { to: "/reports", label: "Reports", icon: FileBarChart },
     { to: "/history", label: "History", icon: HistoryIcon },
     { to: "/settings", label: "Settings", icon: Settings },
     { to: "/help", label: "Help", icon: CircleHelp }

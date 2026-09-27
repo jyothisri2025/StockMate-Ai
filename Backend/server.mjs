@@ -9,7 +9,38 @@ const dataPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "invent
 const backupPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "inventory.backup.json");
 const historyPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "history.json");
 const chatPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "chat-history.json");
+const vendorsPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "vendors.json");
+const purchasesPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "purchases.json");
+const issuesPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "issues.json");
 const sessions = new Set();
+
+function readJson(filePath, fallback = []) {
+  if (!existsSync(filePath)) writeFileSync(filePath, JSON.stringify(fallback, null, 2));
+  try { return JSON.parse(readFileSync(filePath, "utf8")); } catch { return fallback; }
+}
+
+function writeJson(filePath, value) { writeFileSync(filePath, JSON.stringify(value, null, 2)); }
+
+function nextItemCode(inventory) {
+  const numbers = inventory.map((item) => Number(String(item.itemCode || "").match(/(\d+)$/)?.[1] || 0));
+  return `ITM-${String(Math.max(0, ...numbers) + 1).padStart(4, "0")}`;
+}
+
+function ensureItemCodes(inventory) {
+  const used = new Set();
+  let changed = false;
+  for (const item of inventory) {
+    if (!item.itemCode || used.has(item.itemCode)) {
+      let code = nextItemCode(inventory);
+      while (used.has(code)) { inventory.push({ itemCode: code }); code = nextItemCode(inventory); inventory.pop(); }
+      item.itemCode = code;
+      changed = true;
+    }
+    used.add(item.itemCode);
+    item.vendors = Array.isArray(item.vendors) ? item.vendors : [];
+  }
+  return changed;
+}
 
 function readInventory() {
   if (!existsSync(dataPath) && existsSync(backupPath)) {
@@ -25,10 +56,28 @@ function readInventory() {
     const backup = JSON.parse(readFileSync(backupPath, "utf8"));
     if (Array.isArray(backup) && backup.length) {
       writeFileSync(dataPath, JSON.stringify(backup, null, 2));
+      ensureItemCodes(backup);
       return backup;
     }
   }
+  if (ensureItemCodes(inventory)) saveInventory(inventory);
+  migrateVendors(inventory);
+  readJson(vendorsPath);
+  readJson(purchasesPath);
+  readJson(issuesPath);
   return inventory;
+}
+
+function migrateVendors(inventory) {
+  const vendors = readJson(vendorsPath);
+  let changed = false;
+  inventory.filter((item) => item.vendor).forEach((item) => {
+    if (!vendors.some((vendor) => vendor.vendorName.toLowerCase() === String(item.vendor).toLowerCase())) {
+      vendors.push({ vendorId: `VEN-${String(vendors.length + 1).padStart(4, "0")}`, vendorName: item.vendor, active: true, createdAt: new Date().toISOString() });
+      changed = true;
+    }
+  });
+  if (changed) writeJson(vendorsPath, vendors);
 }
 
 function isAuthorized(request) {
@@ -162,6 +211,126 @@ function importWorkbook(data, filename, text) {
   return inventory;
 }
 
+function normalizedHeader(value) { return String(value || "").toLowerCase().replace(/[^a-z0-9]/g, ""); }
+
+function masterValue(row, aliases) {
+  const key = Object.keys(row).find((candidate) => aliases.includes(normalizedHeader(candidate)));
+  return key === undefined ? undefined : row[key];
+}
+
+function hasMasterValue(value) { return value !== undefined && value !== null && String(value).trim() !== ""; }
+
+const masterHeaderAliases = new Set(["itemcode", "sku", "productcode", "stockcode", "itemname", "item", "product", "productname", "name", "category", "group", "type", "unit", "uom", "measurement", "currentstock", "stockbalance", "balance", "quantity", "qty", "stock", "unitprice", "purchaseprice", "price", "cost", "rate", "lastpurchaseprice", "vendor", "vendorname", "supplier", "suppliername", "vendorid", "supplierid", "contactperson", "contact", "phone", "email", "address", "reorderlevel", "minimumstock", "minstock", "threshold", "purchasedate", "datepurchased", "receiveddate", "purchasequantity", "purchasedqty", "receivedquantity", "receivedqty", "issuedate", "dateissued", "useddate", "issuequantity", "issuedquantity", "issuedqty", "quantityissued", "usedquantity", "department", "receivingdepartment", "issuedtodepartment"]);
+
+function detectMasterHeader(rows) {
+  let best = { index: -1, score: 0 };
+  rows.slice(0, 25).forEach((row, index) => {
+    const score = row.reduce((total, value) => total + (masterHeaderAliases.has(normalizedHeader(value)) ? 1 : 0), 0);
+    if (score > best.score) best = { index, score };
+  });
+  return best.score >= 1 ? best.index : -1;
+}
+
+function positionalMasterHeaders(sheetName) {
+  if (sheetName === "H K & Dispo.") return ["itemCode", "itemName", "stockToday", "purchaseQuantity", "unitPrice", "rate2", "totalQuantity", "vendor", "department", "issueQuantity", "currentStock"];
+  return ["itemCode", "unitPrice", "itemName", "stockToday", "purchaseQuantity", "rate2", "rate3", "totalQuantity", "departmentNorthIndian", "departmentChinese", "departmentTandoori", "departmentSouthIndian", "departmentPantry", "departmentOther", "waste", "currentStock"];
+}
+
+function splitVendorContact(value) {
+  const text = String(value || "").trim();
+  const match = text.match(/^(.*?)(?:\s*;\s*|\s+-\s+|\s*\|\s*)(\+?\d[\d\s-]{6,})$/);
+  return match ? { name: match[1].trim(), phone: match[2].replace(/\s+/g, " ").trim() } : { name: text, phone: "" };
+}
+
+function isDepartmentColumn(key) {
+  const value = normalizedHeader(key);
+  return value.startsWith("department") || ["kitchen", "restaurant", "banquet", "housekeeping", "northindian", "southindian", "chinese", "tandoori", "pantry", "management", "rooms"].some((term) => value.includes(term));
+}
+
+function validMasterDate(value) {
+  if (!hasMasterValue(value)) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) throw new Error(`Invalid date in Master List: ${value}`);
+  return date.toISOString();
+}
+
+function masterRows(data, filename, text) {
+  let workbook;
+  if (text && String(text).trim()) workbook = XLSX.read(String(text), { type: "string", raw: false });
+  else if (data && filename) workbook = XLSX.read(Buffer.from(data, "base64"), { type: "buffer", raw: false });
+  else throw new Error("No Master List file or table was received.");
+  const rows = workbook.SheetNames.flatMap((sheetName) => {
+    const matrix = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { header: 1, defval: "", raw: false });
+    const headerIndex = detectMasterHeader(matrix);
+    const headers = headerIndex >= 0 ? matrix[headerIndex].map((value, index) => normalizedHeader(value) || `column${index}`) : positionalMasterHeaders(sheetName);
+    const dataStart = headerIndex >= 0 ? headerIndex + 1 : 0;
+    return matrix.slice(dataStart).map((values, rowIndex) => {
+      const row = { __sheetName: sheetName, __rowIndex: rowIndex + dataStart + 1 };
+      headers.forEach((header, index) => { row[header] = values[index] ?? ""; });
+      return row;
+    }).filter((row) => Object.values(row).some((value) => hasMasterValue(value) && !String(value).startsWith("__")));
+  });
+  if (!rows.length) throw new Error(`No rows found in ${filename || "Master List"}.`);
+  return rows;
+}
+
+function processMasterList(data, filename, text) {
+  const rows = masterRows(data, filename, text);
+  const inventory = readInventory(); const vendors = readVendors(); const purchases = readPurchases(); const issues = readIssues();
+  const summary = { itemsProcessed: 0, vendorsProcessed: 0, purchasesUpdated: 0, issuesUpdated: 0, createdItems: 0, createdVendors: 0, errors: [], currentStockProvided: 0 };
+  const historyRecords = [];
+  const touchedVendors = new Set(); const now = new Date().toISOString();
+  rows.forEach((row, rowIndex) => {
+    try {
+      const itemCodeValue = masterValue(row, ["itemcode", "sku", "productcode", "stockcode"]);
+      const nameValue = masterValue(row, ["itemname", "item", "product", "productname", "name"]);
+      const itemCode = hasMasterValue(itemCodeValue) ? String(itemCodeValue).trim() : "";
+      const name = hasMasterValue(nameValue) ? String(nameValue).trim() : "";
+      if (!itemCode && !name) throw new Error("Item Code or Item Name is required.");
+      let item = itemCode ? inventory.find((entry) => entry.itemCode === itemCode) : null;
+      if (!item && name) item = inventory.find((entry) => entry.name.toLowerCase() === name.toLowerCase());
+      if (!item) { item = { id: `${Date.now()}-master-${rowIndex}`, itemCode: itemCode || nextItemCode(inventory), name: name || itemCode, category: "Stock", quantity: 0, unit: "kg", unitPrice: 0, reorderLevel: 0, vendors: [], usageByDepartment: {}, updatedAt: now }; inventory.push(item); summary.createdItems += 1; }
+      if (itemCode) item.itemCode = itemCode;
+      if (name) item.name = name;
+      const category = masterValue(row, ["category", "group", "type"]); item.category = hasMasterValue(category) ? String(category).trim() : item.category || row.__sheetName || "Stock"; item.sourceSheet = row.__sheetName || item.sourceSheet || "Master List";
+      const unit = masterValue(row, ["unit", "uom", "measurement"]); if (hasMasterValue(unit)) item.unit = normalizeUnit(String(unit));
+      const stockTodayValue = masterValue(row, ["stocktoday", "openingstock", "stockasontoday"]); if (hasMasterValue(stockTodayValue)) item.stockToday = Number(stockTodayValue);
+      const purchasedValue = masterValue(row, ["purchasequantity", "purchasedqty", "purchased", "receivedquantity", "receivedqty"]); if (hasMasterValue(purchasedValue)) item.purchased = Number(purchasedValue);
+      const issuedValue = masterValue(row, ["issuequantity", "issuedquantity", "issuedqty", "issued", "quantityissued", "usedquantity"]); if (hasMasterValue(issuedValue)) item.issued = Number(issuedValue);
+      if (item.stockToday !== undefined && !Number.isFinite(item.stockToday)) throw new Error("Stock as Today must be numeric.");
+      if (item.purchased !== undefined && (!Number.isFinite(item.purchased) || item.purchased < 0)) throw new Error("Purchased quantity must be zero or greater.");
+      if (item.issued !== undefined && (!Number.isFinite(item.issued) || item.issued < 0)) throw new Error("Issued quantity must be zero or greater.");
+      const reorder = masterValue(row, ["reorderlevel", "minimumstock", "minstock", "threshold"]); if (hasMasterValue(reorder)) { item.reorderLevel = Number(reorder); if (!Number.isFinite(item.reorderLevel) || item.reorderLevel < 0) throw new Error("Reorder level must be zero or greater."); }
+      const currentStock = masterValue(row, ["currentstock", "stockbalance", "balance", "quantity", "qty", "stock"]);
+      if (hasMasterValue(currentStock)) { const quantity = Number(currentStock); if (!Number.isFinite(quantity) || quantity < 0) throw new Error("Current Stock must be zero or greater."); item.quantity = quantity; summary.currentStockProvided += 1; }
+      const priceValue = masterValue(row, ["unitprice", "purchaseprice", "price", "cost", "rate", "lastpurchaseprice"]);
+      if (hasMasterValue(priceValue)) { item.unitPrice = Number(priceValue); if (!Number.isFinite(item.unitPrice) || item.unitPrice < 0) throw new Error("Unit Price cannot be negative."); item.lastPurchasePrice = item.unitPrice; }
+      const rawVendorValue = masterValue(row, ["vendor", "vendorname", "supplier", "suppliername"]); const vendorContact = splitVendorContact(rawVendorValue); const vendorNameValue = hasMasterValue(rawVendorValue) ? vendorContact.name : rawVendorValue; const vendorIdValue = masterValue(row, ["vendorid", "supplierid"]);
+      let vendor = null;
+      if (hasMasterValue(vendorIdValue)) vendor = vendors.find((entry) => entry.vendorId === String(vendorIdValue).trim());
+      if (!vendor && hasMasterValue(vendorNameValue)) vendor = vendors.find((entry) => entry.vendorName.toLowerCase() === String(vendorNameValue).trim().toLowerCase());
+      if (hasMasterValue(vendorNameValue) || hasMasterValue(vendorIdValue)) {
+        if (!vendor) { vendor = { vendorId: hasMasterValue(vendorIdValue) ? String(vendorIdValue).trim() : `VEN-${String(vendors.length + 1).padStart(4, "0")}`, vendorName: hasMasterValue(vendorNameValue) ? String(vendorNameValue).trim() : String(vendorIdValue).trim(), active: true, createdAt: now }; vendors.push(vendor); summary.createdVendors += 1; }
+        const contact = masterValue(row, ["contactperson", "contact", "phone", "email", "address"]); if (vendorContact.phone) vendor.phone = vendorContact.phone; if (hasMasterValue(contact) && normalizedHeader(Object.keys(row).find((key) => row[key] === contact)) === "phone") vendor.phone = String(contact); if (hasMasterValue(vendorNameValue)) vendor.vendorName = String(vendorNameValue).trim();
+        touchedVendors.add(vendor.vendorId); item.vendor = vendor.vendorName; if (hasMasterValue(priceValue)) updateVendorPrice(item, vendor, item.unitPrice, item.unit, now);
+      }
+      const purchaseDate = validMasterDate(masterValue(row, ["purchasedate", "datepurchased", "receiveddate"])); if (purchaseDate && vendor && hasMasterValue(priceValue)) item.lastPurchaseDate = purchaseDate; const purchaseQuantityValue = masterValue(row, ["purchasequantity", "purchasedqty", "receivedquantity", "receivedqty"]);
+      if (purchaseDate && hasMasterValue(priceValue) && vendor) { const quantity = Number(hasMasterValue(purchaseQuantityValue) ? purchaseQuantityValue : currentStock); if (!Number.isFinite(quantity) || quantity <= 0) throw new Error("Purchase quantity must be greater than 0."); const purchase = { purchaseId: `PUR-${Date.now()}-${rowIndex}`, date: dateOnly(purchaseDate), itemCode: item.itemCode, itemName: item.name, vendorId: vendor.vendorId, vendorName: vendor.vendorName, quantity, unit: item.unit, unitPrice: item.unitPrice, totalPurchaseCost: Number((quantity * item.unitPrice).toFixed(2)), createdAt: purchaseDate }; purchases.push(purchase); summary.purchasesUpdated += 1; }
+      const issueQuantityValue = masterValue(row, ["issuequantity", "issuedquantity", "issuedqty", "quantityissued", "usedquantity"]); const issueDate = validMasterDate(masterValue(row, ["issuedate", "dateissued", "useddate"])); const departmentValue = masterValue(row, ["department", "receivingdepartment", "issuedtodepartment"]);
+      if (hasMasterValue(issueQuantityValue) || issueDate || hasMasterValue(departmentValue)) { const quantity = Number(issueQuantityValue); if (!Number.isFinite(quantity) || quantity <= 0) throw new Error("Issue quantity must be greater than 0."); if (!hasMasterValue(departmentValue)) throw new Error("Issue department is required."); const effectiveIssueDate = issueDate || now; if (!hasMasterValue(currentStock) && quantity > Number(item.quantity || 0)) throw new Error(`Issue quantity exceeds stock for ${item.name}.`); if (!hasMasterValue(currentStock)) applyQuantity(item, quantity, item.unit, "remove"); const unitCost = Number(priceValue ?? item.lastPurchasePrice ?? item.unitPrice ?? 0); const issue = { issueId: `ISS-${Date.now()}-${rowIndex}`, date: dateOnly(effectiveIssueDate), time: effectiveIssueDate.slice(11, 19), itemCode: item.itemCode, itemName: item.name, quantity, unit: item.unit, department: String(departmentValue).trim(), unitCost, vendorId: vendor?.vendorId || "", vendorName: vendor?.vendorName || item.vendor || "", totalIssueValue: Number((quantity * unitCost).toFixed(2)), issuedBy: "Master List", notes: "Imported from Master List", createdAt: effectiveIssueDate }; item.issued = Number(item.issued || 0) + quantity; item.usedToday = Number(item.usedToday || 0) + quantity; item.usageByDepartment = { ...(item.usageByDepartment || {}), [issue.department]: Number(item.usageByDepartment?.[issue.department] || 0) + quantity }; issues.push(issue); summary.issuesUpdated += 1; }
+      const explicitIssue = hasMasterValue(issueQuantityValue) || issueDate || hasMasterValue(departmentValue); const departmentColumns = Object.entries(row).filter(([key, value]) => key !== "department" && isDepartmentColumn(key) && hasMasterValue(value));
+      if (!explicitIssue && departmentColumns.length) departmentColumns.forEach(([key, value], departmentIndex) => { const quantity = Number(value); if (!Number.isFinite(quantity) || quantity < 0) throw new Error(`Department issue for ${key} must be numeric and zero or greater.`); if (quantity === 0) return; if (!hasMasterValue(currentStock) && quantity > Number(item.quantity || 0)) throw new Error(`Department issue exceeds stock for ${item.name}.`); if (!hasMasterValue(currentStock)) applyQuantity(item, quantity, item.unit, "remove"); const department = String(key).replace(/^department/i, "").replace(/([a-z])([A-Z])/g, "$1 $2").trim() || "General"; const unitCost = Number(item.lastPurchasePrice ?? item.unitPrice ?? 0); item.issued = Number(item.issued || 0) + quantity; item.usedToday = Number(item.usedToday || 0) + quantity; item.usageByDepartment = { ...(item.usageByDepartment || {}), [department]: Number(item.usageByDepartment?.[department] || 0) + quantity }; issues.push({ issueId: `ISS-${Date.now()}-${rowIndex}-${departmentIndex}`, date: dateOnly(purchaseDate || now), time: now.slice(11, 19), itemCode: item.itemCode, itemName: item.name, quantity, unit: item.unit, department, unitCost, vendorId: vendor?.vendorId || "", vendorName: vendor?.vendorName || item.vendor || "", totalIssueValue: Number((quantity * unitCost).toFixed(2)), issuedBy: "Master List", notes: "Imported department column", createdAt: purchaseDate || now }); summary.issuesUpdated += 1; });
+      item.updatedAt = now; historyRecords.push({ itemCode: item.itemCode, itemName: item.name, vendorName: vendor?.vendorName || item.vendor || "", quantity: hasMasterValue(currentStock) ? Number(currentStock) : Number(item.quantity || 0), unit: item.unit, unitPrice: Number(item.lastPurchasePrice ?? item.unitPrice ?? 0), action: "MASTER_LIST_UPDATE", source: filename || "Master List", createdAt: now }); summary.itemsProcessed += 1;
+    } catch (error) { summary.errors.push(`Row ${rowIndex + 2}: ${error.message}`); }
+  });
+  if (!summary.itemsProcessed) throw new Error(`No valid Master List rows were processed. ${summary.errors.join(" ")}`);
+  ensureItemCodes(inventory); saveInventory(inventory); writeJson(vendorsPath, vendors); writeJson(purchasesPath, purchases); writeJson(issuesPath, issues);
+  const outOfStock = inventory.filter((item) => Number(item.quantity) === 0).length; const lowStock = inventory.filter((item) => Number(item.quantity) > 0 && Number(item.reorderLevel) > 0 && Number(item.quantity) <= Number(item.reorderLevel)).length; const totalStock = inventory.reduce((sum, item) => sum + Number(item.quantity || 0), 0);
+  const reply = `Master List processed successfully.\n\n✓ ${summary.itemsProcessed} items processed\n✓ ${touchedVendors.size} vendors processed\n✓ ${summary.purchasesUpdated} purchase records updated\n✓ ${summary.issuesUpdated} issue records updated\n\nInventory:\n• ${totalStock.toLocaleString()} total stock units\n• ${outOfStock} items out of stock\n• ${lowStock} items low stock${summary.errors.length ? `\n\nSkipped rows: ${summary.errors.length}` : ""}`;
+  const history = readHistory(); history.push({ id: `${Date.now()}`, message: `${filename || "Master List"} processed`, reply, operation: "master-list", itemName: "Master List", quantity: summary.itemsProcessed, unit: "items", createdAt: now, details: summary, records: historyRecords }); saveHistory(history);
+  return { inventory, vendors, purchases, issues, summary: { ...summary, vendorsProcessed: touchedVendors.size, totalStock, outOfStock, lowStock }, reply };
+}
+
 function saveInventory(inventory) {
   const serialized = JSON.stringify(inventory, null, 2);
   writeFileSync(dataPath, serialized);
@@ -175,6 +344,102 @@ function readHistory() {
 
 function saveHistory(history) {
   writeFileSync(historyPath, JSON.stringify(history.slice(-100), null, 2));
+}
+
+function readVendors() { return readJson(vendorsPath); }
+function readPurchases() { return readJson(purchasesPath); }
+function readIssues() { return readJson(issuesPath); }
+
+function dateOnly(value = new Date()) { return new Date(value).toISOString().slice(0, 10); }
+
+function findInventoryItem(inventory, body) {
+  return inventory.find((item) => body.itemCode && item.itemCode === body.itemCode)
+    || inventory.find((item) => body.itemId && item.id === body.itemId)
+    || findItem(inventory, body.itemName || body.name);
+}
+
+function requirePositive(value, label) {
+  const result = Number(value);
+  if (!Number.isFinite(result) || result <= 0) throw new Error(`${label} must be greater than 0.`);
+  return result;
+}
+
+function requireVendor(vendorId) {
+  const vendor = readVendors().find((entry) => entry.vendorId === vendorId);
+  if (!vendor) throw new Error("Select an existing vendor first.");
+  return vendor;
+}
+
+function updateVendorPrice(item, vendor, price, unit, createdAt) {
+  const priceEntry = { vendorId: vendor.vendorId, vendorName: vendor.vendorName, purchasePrice: price, unit, lastPurchaseDate: createdAt };
+  item.vendors = (item.vendors || []).filter((entry) => entry.vendorId !== vendor.vendorId).concat(priceEntry);
+  item.vendor = vendor.vendorName;
+  item.unitPrice = price;
+  item.lastPurchasePrice = price;
+  item.lastPurchaseDate = createdAt;
+}
+
+function recordPurchase(body) {
+  const inventory = readInventory();
+  const item = findInventoryItem(inventory, body);
+  if (!item) throw new Error("The selected inventory item does not exist.");
+  const vendor = requireVendor(body.vendorId);
+  const quantity = requirePositive(body.quantity, "Purchase quantity");
+  const unitPrice = Number(body.unitPrice);
+  if (!Number.isFinite(unitPrice) || unitPrice < 0) throw new Error("Purchase price cannot be negative.");
+  const createdAt = new Date(body.date || Date.now()).toISOString();
+  const purchase = { purchaseId: `PUR-${Date.now()}`, date: dateOnly(createdAt), itemCode: item.itemCode, itemName: item.name, vendorId: vendor.vendorId, vendorName: vendor.vendorName, quantity, unit: body.unit || item.unit, unitPrice, totalPurchaseCost: Number((quantity * unitPrice).toFixed(2)), createdAt };
+  applyQuantity(item, quantity, purchase.unit, "add");
+  item.purchased = Number(item.purchased || 0) + quantity;
+  item.totalQuantity = Number(item.totalQuantity || 0) + quantity;
+  updateVendorPrice(item, vendor, unitPrice, purchase.unit, createdAt);
+  saveInventory(inventory);
+  const purchases = readPurchases(); purchases.push(purchase); writeJson(purchasesPath, purchases);
+  recordHistory(`Purchase: ${item.name} from ${vendor.vendorName}`, `${quantity} ${purchase.unit} purchased for ₹${purchase.totalPurchaseCost}.`, "purchase", item, quantity, purchase.unit);
+  return { purchase, inventory, changed: item };
+}
+
+function recordIssue(body) {
+  const inventory = readInventory();
+  const item = findInventoryItem(inventory, body);
+  if (!item) throw new Error("The selected inventory item does not exist.");
+  const quantity = requirePositive(body.quantity, "Issue quantity");
+  if (!body.department?.trim()) throw new Error("Receiving department is required.");
+  const available = toBaseQuantity(Number(item.quantity || 0), item.unit);
+  const requested = toBaseQuantity(quantity, normalizeUnit(body.unit || item.unit));
+  if (requested > available + 0.000001) throw new Error(`Only ${item.quantity} ${item.unit} is available; issue quantity is too high.`);
+  const vendor = body.vendorId ? requireVendor(body.vendorId) : null;
+  const unitCost = Number(body.unitCost ?? item.lastPurchasePrice ?? item.unitPrice ?? 0);
+  if (!Number.isFinite(unitCost) || unitCost < 0) throw new Error("Issue cost cannot be negative.");
+  const createdAt = new Date(body.date || Date.now()).toISOString();
+  const issue = { issueId: `ISS-${Date.now()}`, date: dateOnly(createdAt), time: createdAt.slice(11, 19), itemCode: item.itemCode, itemName: item.name, quantity, unit: body.unit || item.unit, department: body.department.trim(), unitCost, vendorId: vendor?.vendorId || "", vendorName: vendor?.vendorName || item.vendor || "", totalIssueValue: Number((quantity * unitCost).toFixed(2)), issuedBy: body.issuedBy || "Admin", notes: body.notes || "", createdAt };
+  applyQuantity(item, quantity, issue.unit, "remove");
+  item.issued = Number(item.issued || 0) + quantity;
+  item.usedToday = Number(item.usedToday || 0) + quantity;
+  item.usageByDepartment = { ...(item.usageByDepartment || {}), [issue.department]: Number(item.usageByDepartment?.[issue.department] || 0) + quantity };
+  saveInventory(inventory);
+  const issues = readIssues(); issues.push(issue); writeJson(issuesPath, issues);
+  recordHistory(`Issue: ${item.name} to ${issue.department}`, `${quantity} ${issue.unit} issued for ₹${issue.totalIssueValue}.`, "issue", item, quantity, issue.unit);
+  return { issue, inventory, changed: item };
+}
+
+function sumBy(records, key, valueKey) {
+  return records.reduce((result, record) => { const name = record[key] || "Unknown"; result[name] = Number((result[name] || 0) + Number(record[valueKey] || 0)); return result; }, {});
+}
+
+function reportForRange(from, to) {
+  const purchases = readPurchases().filter((entry) => entry.date >= from && entry.date <= to);
+  const issues = readIssues().filter((entry) => entry.date >= from && entry.date <= to);
+  return { purchases, issues, purchaseValue: purchases.reduce((sum, entry) => sum + entry.totalPurchaseCost, 0), issueValue: issues.reduce((sum, entry) => sum + entry.totalIssueValue, 0), purchaseQuantity: purchases.reduce((sum, entry) => sum + entry.quantity, 0), issueQuantity: issues.reduce((sum, entry) => sum + entry.quantity, 0), vendorTotals: sumBy(purchases, "vendorName", "totalPurchaseCost"), departmentTotals: sumBy(issues, "department", "totalIssueValue") };
+}
+
+function dailyReport(date = dateOnly()) { return { date, ...reportForRange(date, date), inventory: readInventory() }; }
+
+function monthlyReport(month = dateOnly().slice(0, 7)) {
+  const report = reportForRange(`${month}-01`, `${month}-31`);
+  const itemTotals = {};
+  report.issues.forEach((entry) => { itemTotals[entry.itemCode] = itemTotals[entry.itemCode] || { itemCode: entry.itemCode, itemName: entry.itemName, quantity: 0, value: 0 }; itemTotals[entry.itemCode].quantity += entry.quantity; itemTotals[entry.itemCode].value += entry.totalIssueValue; });
+  return { month, ...report, itemTotals: Object.values(itemTotals), lowStock: readInventory().filter((item) => Number(item.quantity) === 0 || (Number(item.reorderLevel) > 0 && Number(item.quantity) <= Number(item.reorderLevel))) };
 }
 
 function readChatHistory() {
@@ -237,9 +502,42 @@ function fallbackAction(text) {
   return { intent: quantity && name ? "update" : "question", operation, itemName: name || null, quantity, unit };
 }
 
+function operationalAnswer(message, inventory) {
+  const lower = message.toLowerCase(); const purchases = readPurchases(); const issues = readIssues(); const today = dateOnly();
+  if (/which items.*out of stock|out of stock items|what is out of stock/.test(lower)) {
+    const rows = inventory.filter((entry) => Number(entry.quantity) === 0);
+    return rows.length ? `${rows.length} items are out of stock: ${rows.map((entry) => `${entry.itemCode} ${entry.name}`).join(", ")}.` : "No items are currently out of stock.";
+  }
+  if (/what did we issue|issues today|issued today/.test(lower)) {
+    const rows = issues.filter((entry) => entry.date === today);
+    return rows.length ? `Today we issued ${rows.map((entry) => `${entry.quantity} ${entry.unit} ${entry.itemName} to ${entry.department}`).join(", ")}. Total issue value is ₹${rows.reduce((sum, entry) => sum + entry.totalIssueValue, 0).toLocaleString()}.` : "There are no issue transactions recorded today.";
+  }
+  if (/purchase.*month|purchased.*month/.test(lower)) {
+    const month = today.slice(0, 7); const rows = purchases.filter((entry) => entry.date.startsWith(month));
+    return `This month we recorded ${rows.length} purchases worth ₹${rows.reduce((sum, entry) => sum + entry.totalPurchaseCost, 0).toLocaleString()}.`;
+  }
+  const ignoredWords = new Set(["how", "much", "do", "we", "have", "is", "the", "what", "latest", "price", "who", "supplies", "stock", "left", "of", "did", "issue", "to", "kitchen"]);
+  const itemTerms = lower.replace(/[^a-z0-9 ]/g, " ").split(/\s+/).filter((term) => term.length > 2 && !ignoredWords.has(term));
+  const item = inventory.find((entry) => lower.includes(entry.name.toLowerCase())) || inventory.find((entry) => itemTerms.some((term) => entry.name.toLowerCase().includes(term)));
+  if (item && /how much|how many|left|stock/.test(lower)) return `${item.name} (${item.itemCode}) has ${item.quantity} ${item.unit} in stock.`;
+  if (item && /vendor|suppl(?:y|ies|ied)|last price|price.*pay/.test(lower)) {
+    const prices = item.vendors?.length ? item.vendors.map((entry) => `${entry.vendorName} at ₹${entry.purchasePrice}/${entry.unit}`).join(", ") : item.vendor ? `${item.vendor} at ₹${item.unitPrice}/${item.unit}` : "no vendor price is recorded";
+    return `${item.name} (${item.itemCode}) supplier pricing: ${prices}.`;
+  }
+  if (/department.*consum|consum.*department|most stock/.test(lower)) {
+    const totals = sumBy(issues, "department", "totalIssueValue"); const winner = Object.entries(totals).sort((a, b) => b[1] - a[1])[0];
+    return winner ? `${winner[0]} has consumed the most by value: ₹${Number(winner[1]).toLocaleString()}.` : "There are no issue transactions to compare yet.";
+  }
+  if (/housekeeping|kitchen|restaurant|banquet/.test(lower) && /issue|gave|issued|yesterday/.test(lower)) {
+    const department = ["housekeeping", "kitchen", "restaurant", "banquet"].find((name) => lower.includes(name)); const rows = issues.filter((entry) => entry.department.toLowerCase().includes(department));
+    return rows.length ? `${department} received ${rows.reduce((sum, entry) => sum + entry.quantity, 0)} units across ${rows.length} issue transactions.` : `No issue transactions are recorded for ${department}.`;
+  }
+  return null;
+}
+
 async function getAction(message, inventory) {
   if (!process.env.GROQ_API_KEY) return fallbackAction(message);
-  const prompt = `You are Stocky, a single inventory agent for a hotel. Return JSON only with keys intent (update|question), operation (add|remove), itemName, quantity, unit, reply. Understand Telugu written with English/Latin letters and Telugu-English mixed sentences. Preserve the user's conversational style in reply when practical. Match itemName against the imported inventory, including category and vendor context. Infer synonyms such as bought/received/add and used/sold/removed. Units must be kg, g, L, or ml, but hotel template items such as boxes, pieces, pens, and rolls may use unit. Inventory: ${JSON.stringify(inventory)}. User: ${message}`;
+  const prompt = `You are Stocky, a single inventory agent for a hotel. Return JSON only with keys intent (update|question), operation (add|remove), itemName, quantity, unit, reply. Understand Telugu written with English/Latin letters and Telugu-English mixed sentences. Preserve the user's conversational style in reply when practical. Match itemName against the imported inventory, including category and vendor context. Infer synonyms such as bought/received/add and used/sold/removed. Units must be kg, g, L, or ml, but hotel template items such as boxes, pieces, pens, and rolls may use unit. Inventory: ${JSON.stringify(inventory)}. Recent purchases: ${JSON.stringify(readPurchases().slice(-100))}. Recent issues: ${JSON.stringify(readIssues().slice(-100))}. User: ${message}`;
   const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
@@ -257,14 +555,17 @@ function replyFor(action, item) {
 
 async function handleAgent(body) {
   const inventory = readInventory();
+  const operationalReply = operationalAnswer(body.message, inventory);
+  if (operationalReply) { recordChat(body.message, operationalReply); return { reply: operationalReply, inventory, changed: null }; }
   const action = await getAction(body.message, inventory);
   if (action.intent === "update" && action.itemName && action.quantity) {
     const itemName = action.itemName.toLowerCase();
     let item = findItem(inventory, itemName);
     if (!item) {
-      item = { id: `${Date.now()}`, name: action.itemName.replace(/\b\w/g, (letter) => letter.toUpperCase()), quantity: 0, unit: normalizeUnit(action.unit), unitPrice: 0, reorderLevel: 5, updatedAt: new Date().toISOString() };
+      item = { id: `${Date.now()}`, itemCode: nextItemCode(inventory), name: action.itemName.replace(/\b\w/g, (letter) => letter.toUpperCase()), quantity: 0, unit: normalizeUnit(action.unit), unitPrice: 0, reorderLevel: 5, vendors: [], updatedAt: new Date().toISOString() };
       inventory.push(item);
     }
+    if (action.operation === "remove" && toBaseQuantity(Number(action.quantity), normalizeUnit(action.unit || item.unit)) > toBaseQuantity(Number(item.quantity || 0), item.unit) + 0.000001) throw new Error(`Only ${item.quantity} ${item.unit} is available; issue quantity is too high.`);
     applyQuantity(item, action.quantity, action.unit, action.operation);
     saveInventory(inventory);
     const reply = action.reply || replyFor(action, item);
@@ -283,10 +584,16 @@ function mutateInventory(body) {
   const inventory = readInventory();
   let item = body.itemId ? inventory.find((entry) => entry.id === body.itemId) : findItem(inventory, body.name);
   if (!item) {
-    item = { id: `${Date.now()}`, name: body.name.trim(), category: body.category || "Stock", quantity: 0, unit: normalizeUnit(body.unit), unitPrice: 0, reorderLevel: 0, stockToday: 0, purchased: 0, totalQuantity: 0, issued: 0, usedToday: 0, waste: 0, usageByDepartment: {}, vendor: body.vendor || "", department: body.department || "", sourceSheet: body.category || "Stock", updatedAt: new Date().toISOString() };
+    item = { id: `${Date.now()}`, itemCode: nextItemCode(inventory), name: body.name.trim(), category: body.category || "Stock", quantity: 0, unit: normalizeUnit(body.unit), unitPrice: 0, reorderLevel: 0, stockToday: 0, purchased: 0, totalQuantity: 0, issued: 0, usedToday: 0, waste: 0, usageByDepartment: {}, vendors: [], vendor: body.vendor || "", department: body.department || "", sourceSheet: body.category || "Stock", updatedAt: new Date().toISOString() };
     inventory.push(item);
   }
   if (body.operation === "remove" || body.operation === "add") {
+    if (body.operation === "remove") {
+      const requested = toBaseQuantity(Number(body.quantity || 0), normalizeUnit(body.unit || item.unit));
+      const available = toBaseQuantity(Number(item.quantity || 0), item.unit);
+      if (!Number.isFinite(requested) || requested <= 0) throw new Error("Quantity must be greater than 0.");
+      if (requested > available + 0.000001) throw new Error(`Only ${item.quantity} ${item.unit} is available; issue quantity is too high.`);
+    }
     applyQuantity(item, Number(body.quantity || 0), body.unit || item.unit, body.operation);
     item.usedToday = Number(item.usedToday || 0) + (body.operation === "remove" ? Number(body.quantity || 0) : 0);
     item.issued = Number(item.issued || 0) + (body.operation === "remove" ? Number(body.quantity || 0) : 0);
@@ -308,8 +615,17 @@ function mutateInventory(body) {
 }
 
 function send(response, status, payload) {
-  response.writeHead(status, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET,POST,OPTIONS", "Access-Control-Allow-Headers": "Content-Type,Authorization" });
+  response.writeHead(status, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET,POST,PUT,OPTIONS", "Access-Control-Allow-Headers": "Content-Type,Authorization" });
   response.end(JSON.stringify(payload));
+}
+
+function requestBody(request) {
+  return new Promise((resolve, reject) => {
+    let body = "";
+    request.on("data", (chunk) => { body += chunk; });
+    request.on("end", () => { try { resolve(body ? JSON.parse(body) : {}); } catch (error) { reject(new Error("Invalid JSON request.")); } });
+    request.on("error", reject);
+  });
 }
 
 createServer(async (request, response) => {
@@ -328,6 +644,41 @@ createServer(async (request, response) => {
   }
   if (!isAuthorized(request)) return send(response, 401, { error: "Please log in first" });
   if (request.method === "GET" && request.url === "/api/inventory") return send(response, 200, { inventory: readInventory() });
+  const requestUrl = new URL(request.url, `http://${request.headers.host || "localhost"}`);
+  if (request.method === "GET" && requestUrl.pathname === "/api/vendors") return send(response, 200, { vendors: readVendors() });
+  if (request.method === "POST" && requestUrl.pathname === "/api/vendors") {
+    try {
+      const body = await requestBody(request);
+      if (!body.vendorName?.trim()) throw new Error("Vendor name is required.");
+      const vendors = readVendors();
+      if (vendors.some((vendor) => vendor.vendorName.toLowerCase() === body.vendorName.trim().toLowerCase())) throw new Error("Vendor already exists.");
+      const vendor = { vendorId: `VEN-${String(vendors.length + 1).padStart(4, "0")}`, vendorName: body.vendorName.trim(), contactPerson: body.contactPerson || "", phone: body.phone || "", email: body.email || "", address: body.address || "", active: body.active !== false, createdAt: new Date().toISOString() };
+      vendors.push(vendor); writeJson(vendorsPath, vendors); return send(response, 201, { vendor, vendors });
+    } catch (error) { return send(response, 400, { error: error.message }); }
+  }
+  if (request.method === "PUT" && requestUrl.pathname.startsWith("/api/vendors/")) {
+    try {
+      const vendorId = decodeURIComponent(requestUrl.pathname.split("/").pop());
+      const body = await requestBody(request); const vendors = readVendors(); const vendor = vendors.find((entry) => entry.vendorId === vendorId);
+      if (!vendor) return send(response, 404, { error: "Vendor not found." });
+      Object.assign(vendor, { vendorName: body.vendorName?.trim() || vendor.vendorName, contactPerson: body.contactPerson ?? vendor.contactPerson, phone: body.phone ?? vendor.phone, email: body.email ?? vendor.email, address: body.address ?? vendor.address, active: body.active ?? vendor.active });
+      writeJson(vendorsPath, vendors); return send(response, 200, { vendor, vendors });
+    } catch (error) { return send(response, 400, { error: error.message }); }
+  }
+  if (request.method === "GET" && requestUrl.pathname === "/api/purchases") return send(response, 200, { purchases: readPurchases() });
+  if (request.method === "POST" && requestUrl.pathname === "/api/purchases") { try { return send(response, 201, recordPurchase(await requestBody(request))); } catch (error) { return send(response, 400, { error: error.message }); } }
+  if (request.method === "GET" && requestUrl.pathname === "/api/issues") return send(response, 200, { issues: readIssues() });
+  if (request.method === "POST" && requestUrl.pathname === "/api/issues") { try { return send(response, 201, recordIssue(await requestBody(request))); } catch (error) { return send(response, 400, { error: error.message }); } }
+  if (request.method === "GET" && requestUrl.pathname === "/api/reports/daily") return send(response, 200, dailyReport(requestUrl.searchParams.get("date") || dateOnly()));
+  if (request.method === "GET" && requestUrl.pathname === "/api/reports/monthly") return send(response, 200, monthlyReport(requestUrl.searchParams.get("month") || dateOnly().slice(0, 7)));
+  if (request.method === "GET" && requestUrl.pathname === "/api/reports/departments") {
+    const issues = readIssues(); const departments = Object.values(issues.reduce((result, issue) => { const current = result[issue.department] || { department: issue.department, quantity: 0, value: 0, issues: [] }; current.quantity += issue.quantity; current.value += issue.totalIssueValue; current.issues.push(issue); result[issue.department] = current; return result; }, {}));
+    return send(response, 200, { departments, issues });
+  }
+  if (request.method === "GET" && requestUrl.pathname === "/api/reports/vendors") {
+    const purchases = readPurchases(); const inventory = readInventory(); const vendors = readVendors().map((vendor) => { const rows = purchases.filter((entry) => entry.vendorId === vendor.vendorId); const suppliedItems = inventory.filter((item) => item.vendor === vendor.vendorName || item.vendors?.some((entry) => entry.vendorId === vendor.vendorId)); const items = [...new Set([...rows.map((entry) => entry.itemName), ...suppliedItems.map((item) => item.name)])]; const suppliedPrices = suppliedItems.flatMap((item) => item.vendors?.filter((entry) => entry.vendorId === vendor.vendorId).map((entry) => entry.purchasePrice) || []); return { ...vendor, items, purchaseQuantity: rows.reduce((sum, entry) => sum + entry.quantity, 0), purchaseValue: rows.reduce((sum, entry) => sum + entry.totalPurchaseCost, 0), averagePurchasePrice: rows.length ? rows.reduce((sum, entry) => sum + entry.unitPrice, 0) / rows.length : suppliedPrices.length ? suppliedPrices.reduce((sum, price) => sum + price, 0) / suppliedPrices.length : 0, lastPurchaseDate: rows.at(-1)?.date || suppliedItems.map((item) => item.lastPurchaseDate).filter(Boolean).sort().at(-1) || "" }; });
+    return send(response, 200, { vendors });
+  }
   if (request.method === "GET" && request.url === "/api/history") return send(response, 200, { history: readHistory().reverse() });
   if (request.method === "GET" && request.url === "/api/chat-history") return send(response, 200, { history: readChatHistory().filter((entry) => Date.now() - new Date(entry.createdAt).getTime() <= 24 * 60 * 60 * 1000) });
   if (request.method === "GET" && request.url === "/api/activity") {
@@ -342,6 +693,10 @@ createServer(async (request, response) => {
     request.on("data", (chunk) => { body += chunk; });
     request.on("end", () => { try { return send(response, 200, mutateInventory(JSON.parse(body))); } catch (error) { return send(response, 400, { error: error.message }); } });
     return;
+  }
+  if (request.method === "POST" && request.url === "/api/master-list") {
+    try { const payload = await requestBody(request); return send(response, 200, processMasterList(payload.data, payload.filename, payload.text)); }
+    catch (error) { return send(response, 400, { error: error.message }); }
   }
   if (request.method === "POST" && request.url === "/api/import") {
     let body = "";

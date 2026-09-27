@@ -6,6 +6,7 @@
 .category-tabs span { color: #999; margin-left: 6px; font-size: 10px; }
 .table-toolbar > div small { color: var(--muted); font-size: 10px; }
 .usage-chip { display: block; color: var(--navy); font-size: 10px; margin: 2px 0; }
+.zero-stock { color: #b83f3f; }.out-of-stock-row { background: #fff4f2; }.stock-pill.out { color: #a83232; background: #f8d9d5; }
 .form-overlay { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; padding: 18px; background: rgba(23,47,69,.55); }
 .inventory-form { width: min(100%, 650px); max-height: 92svh; overflow: auto; background: #f8f7f2; padding: 26px; box-shadow: 0 22px 60px rgba(0,0,0,.2); }
 .form-heading { display: flex; justify-content: space-between; align-items: start; margin-bottom: 24px; }.form-heading h3 { margin-top: 6px; font-size: 21px; }.icon-button { border: 0; background: transparent; color: var(--muted); cursor: pointer; }

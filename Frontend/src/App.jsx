@@ -15,6 +15,10 @@ import Login from "./pages/Login";
 import History from "./pages/History";
 import ImportInventory from "./pages/ImportInventory";
 import Profile from "./pages/Profile";
+import Purchases from "./pages/Purchases";
+import Issues from "./pages/Issues";
+import Vendors from "./pages/Vendors";
+import Reports from "./pages/Reports";
 
 function App() {
 
@@ -31,6 +35,10 @@ function App() {
           <Route path="profile" element={<Profile />} />
           <Route path="chat" element={<Chat />} />
           <Route path="inventory" element={<Inventory />} />
+          <Route path="purchases" element={<Purchases />} />
+          <Route path="issues" element={<Issues />} />
+          <Route path="vendors" element={<Vendors />} />
+          <Route path="reports" element={<Reports />} />
           <Route path="history" element={<History />} />
           <Route path="settings" element={<Settings />} />
           <Route path="help" element={<Help />} />
